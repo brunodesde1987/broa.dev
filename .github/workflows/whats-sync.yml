@@ -1,4 +1,4 @@
-name: WhatsApp Group Sync (Simple, /tech-debt, fast-forward safe)
+name: WhatsApp Group Sync (/tech-debt, simple)
 
 on:
   push:
@@ -16,13 +16,13 @@ concurrency:
 
 defaults:
   run:
-    shell: bash   # ensure bash everywhere (needed for pipefail, shopt, etc.)
+    shell: bash
 
 env:
   TZ: America/Sao_Paulo
   GROUP_SLUG: tech-debt
   BASE_PATH: /tech-debt
-  ZIP_ROOTS: "chats tech-debt/chats"   # process zips from both locations
+  ZIP_ROOTS: "chats tech-debt/chats"
 
 jobs:
   process:
@@ -33,7 +33,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Ensure our local branch exactly matches remote before we modify files
       - name: Sync to latest remote (avoid non-fast-forward)
         run: |
           set -euo pipefail
@@ -42,31 +41,27 @@ jobs:
           git checkout "$BRANCH"
           git reset --hard "origin/$BRANCH"
 
-      - name: Prepare workspace
+      - name: Process zips, update files, commit
         run: |
           set -euo pipefail
-          mkdir -p ".tmp" "${GROUP_SLUG}/raw" "${GROUP_SLUG}/daily"
 
-      - name: Unzip chats and normalize today's messages
-        run: |
-          set -euo pipefail
+          mkdir -p ".tmp" "${GROUP_SLUG}/raw" "${GROUP_SLUG}/daily"
 
           TODAY=$(date +%F)          # YYYY-MM-DD
           HOUR=$(date +%H)           # 00..23
           TDATE=$(date +%d/%m/%Y)    # DD/MM/YYYY for WhatsApp iOS headers
-
           echo "Today (local): $TODAY ; Hour: $HOUR ; TDATE: $TDATE"
 
-          shopt -s nullglob
           handled_any=0
 
+          # Process zips from both roots
           for ROOT in ${ZIP_ROOTS}; do
             if [ ! -d "$ROOT" ]; then
               echo "Skip: $ROOT (not a directory)"
               continue
             fi
 
-            # find zips under this root (space-safe)
+            # Space-safe scan for zips
             while IFS= read -r -d '' ZIP; do
               echo "Processing ZIP: $ZIP"
               handled_any=1
@@ -74,18 +69,17 @@ jobs:
               mkdir -p "$DEST"
               unzip -o "$ZIP" -d "$DEST" >/dev/null
 
-              # iOS exports: _chat.txt, _chat 2.txt, _chat 3.txt, ...
+              # Find _chat*.txt inside the extracted folder
               while IFS= read -r -d '' TXT; do
                 echo "Found chat txt: $TXT"
 
-                # Portable awk: regex in a variable; detect "DD/MM/YYYY[ ,]HH:MM - "
+                # Portable awk: regex in a variable; detect lines like "DD/MM/YYYY[ ,]HH:MM - "
                 awk -v TDATE="$TDATE" '
                   BEGIN {
                     re_new = "^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}[ ,][0-9]{1,2}:[0-9]{2} - ";
                     in_today = 0;
                   }
                   $0 ~ re_new {
-                    # Extract date token (first token split by space or comma)
                     n = split($0, a, /[ ,]/);
                     datepart = a[1];
                     in_today = (datepart == TDATE) ? 1 : 0;
@@ -97,7 +91,7 @@ jobs:
 
               done < <(find "$DEST" -type f -iname '_chat*.txt' -print0)
 
-              # Clean temp and stage ZIP deletion so it appears in the commit
+              # Clean temp and stage ZIP deletion for commit
               rm -rf "$DEST"
               git rm -f "$ZIP" || true
             done < <(find "$ROOT" -type f -name '*.zip' -print0)
@@ -107,29 +101,16 @@ jobs:
             echo "No zip files found under: ${ZIP_ROOTS}"
           fi
 
-          # De-duplicate lines in today's raw file (multiple zips same day)
+          # De-duplicate the raw/today file (if multiple zips)
           if [ -f "${GROUP_SLUG}/raw/${TODAY}.txt" ]; then
             awk '!seen[$0]++' "${GROUP_SLUG}/raw/${TODAY}.txt" > "${GROUP_SLUG}/raw/${TODAY}.txt.tmp" && mv "${GROUP_SLUG}/raw/${TODAY}.txt.tmp" "${GROUP_SLUG}/raw/${TODAY}.txt"
           fi
 
-          echo "HOUR=$HOUR" >> $GITHUB_ENV
-          echo "TODAY=$TODAY" >> $GITHUB_ENV
-
-      - name: Create/update stub daily summary (only after 18:00)
-        run: |
-          set -euo pipefail
-          TODAY="${TODAY:-$(date +%F)}"
-          HOUR="${HOUR:-$(date +%H)}"
-          RAW="${GROUP_SLUG}/raw/${TODAY}.txt"
-          OUT="${GROUP_SLUG}/daily/${TODAY}.md"
-
+          # Create/refresh stub daily summary after 18:00 local time
           if [ "$HOUR" -ge 18 ]; then
-            if [ -f "$RAW" ]; then
-              COUNT=$(wc -l < "$RAW" | tr -d ' ')
-            else
-              COUNT=0
-            fi
-
+            RAW="${GROUP_SLUG}/raw/${TODAY}.txt"
+            OUT="${GROUP_SLUG}/daily/${TODAY}.md"
+            if [ -f "$RAW" ]; then COUNT=$(wc -l < "$RAW" | tr -d ' '); else COUNT=0; fi
             cat > "$OUT" <<EOF
 # Daily Notes — ${TODAY}
 
@@ -143,9 +124,7 @@ EOF
             echo "Before 18:00 local time; skipping stub daily summary."
           fi
 
-      - name: Ensure members.md exists
-        run: |
-          set -euo pipefail
+          # Ensure members.md exists (placeholder until AI step lands)
           if [ ! -f "${GROUP_SLUG}/members.md" ]; then
             cat > "${GROUP_SLUG}/members.md" <<'EOF'
 # Members Directory
@@ -157,18 +136,13 @@ _No entries yet. This file will be filled once the AI processing is added._
 EOF
           fi
 
-      - name: Update index (base path /tech-debt)
-        run: |
-          set -euo pipefail
-          TODAY="${TODAY:-$(date +%F)}"
+          # Update index.md with /tech-debt base path
           INDEX="${GROUP_SLUG}/index.md"
-
           if [ -f "${GROUP_SLUG}/daily/${TODAY}.md" ]; then
             LATEST="- **Latest daily note:** [${TODAY}](${BASE_PATH}/daily/${TODAY}.md)"
           else
             LATEST="- **Latest daily note:** (none today yet)"
           fi
-
           cat > "$INDEX" <<EOF
 # Tech Debt Group — Daily Notes
 
@@ -177,41 +151,26 @@ ${LATEST}
 
 EOF
 
-      - name: Show changes
-        run: |
-          echo "=== git status ==="
+          echo "=== git status (before commit) ==="
           git status --porcelain
-          echo "=== tree tech-debt ==="
-          ls -la "${GROUP_SLUG}" || true
-          echo "=== tree chats roots (after git rm) ==="
-          for ROOT in ${ZIP_ROOTS}; do
-            echo "--- $ROOT"
-            ls -la "$ROOT" || true
-          done
 
-      - name: Commit & push changes (fast-forward only, retry)
-        run: |
-          set -euo pipefail
-          BRANCH="${GITHUB_REF_NAME}"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
+          # Commit & push
           git add -A
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "chore(ci): normalize WhatsApp export, update index (/tech-debt) and stub daily note"
+          git commit -m "chore(ci): process WhatsApp export(s), update /tech-debt"
+          BRANCH="${GITHUB_REF_NAME}"
 
-          # Try push; if remote advanced during our run, rebase and retry up to 2 times
+          # Push; if remote advanced, rebase & retry
           for attempt in 1 2 3; do
             if git push origin "$BRANCH"; then
               echo "Push succeeded on attempt $attempt"
               break
             fi
-            echo "Push failed (attempt $attempt). Fetching and rebasing..."
+            echo "Push failed (attempt $attempt). Rebasing..."
             git fetch origin "$BRANCH"
             git pull --rebase --autostash origin "$BRANCH"
           done
