@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'chats/**/*.zip'
+    workflow_dispatch: {}
 
 permissions:
   contents: write
