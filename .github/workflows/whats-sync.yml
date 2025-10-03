@@ -1,4 +1,4 @@
-name: WhatsApp Group Sync
+name: WhatsApp Group Sync (Simple, /tech-debt, fast-forward safe)
 
 on:
   push:
@@ -73,17 +73,29 @@ jobs:
               # iOS exports: _chat.txt, _chat 2.txt, _chat 3.txt, ...
               while IFS= read -r -d '' TXT; do
                 echo "Found chat txt: $TXT"
-                # Extract only today's messages; keep continuation lines
+
+                # ---- Portable awk: use a regex variable, no / escaping, no [:space:] ----
+                # Header examples:
+                #   "03/10/2025, 09:12 - Bruno: Hello"
+                #   "03/10/2025 09:12 - Bruno: Hello"  (no comma)
+                # Regex: ^DD/MM/YYYY[ ,]HH:MM -  (we only need to detect "new message" lines)
                 awk -v TDATE="$TDATE" '
-                  BEGIN { in_today = 0 }
-                  /^[0-9]{1,2}\\/[0-9]{1,2}\\/[0-9]{2,4},?[[:space:]][0-9]{1,2}:[0-9]{2}[[:space:]]-[[:space:]]/ {
-                    match($0, /^([0-9]{1,2}\\/[0-9]{1,2}\\/[0-9]{2,4})/, m)
-                    if (m[1] == TDATE) { in_today = 1 } else { in_today = 0 }
-                    if (in_today) print $0
-                    next
+                  BEGIN {
+                    re_new = "^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}[ ,][0-9]{1,2}:[0-9]{2} - ";
+                    in_today = 0;
+                  }
+                  $0 ~ re_new {
+                    # Extract the date part at the beginning (DD/MM/YYYY)
+                    # Using split on space or comma to grab the first token
+                    n = split($0, a, /[ ,]/);
+                    datepart = a[1];
+                    in_today = (datepart == TDATE) ? 1 : 0;
+                    if (in_today) print $0;
+                    next;
                   }
                   { if (in_today) print $0 }
                 ' "$TXT" >> "${GROUP_SLUG}/raw/${TODAY}.txt"
+
               done < <(find "$DEST" -type f -iname '_chat*.txt' -print0)
 
               # Clean temp and stage ZIP deletion so it appears in the commit
@@ -109,7 +121,7 @@ jobs:
           set -euo pipefail
           TODAY="${TODAY:-$(date +%F)}"
           HOUR="${HOUR:-$(date +%H)}"
-          RAW="${GROUP_SLUG}/raw/${TODAY}.txt"
+          RAW="${GROUP_SLUG}/raw/${TODAY}.txt}"
           OUT="${GROUP_SLUG}/daily/${TODAY}.md"
 
           if [ "$HOUR" -ge 18 ]; then
@@ -153,42 +165,3 @@ jobs:
           INDEX="${GROUP_SLUG}/index.md"
           {
             echo "# Tech Debt Group — Daily Notes"
-            echo
-            if [ -f "${GROUP_SLUG}/daily/${TODAY}.md" ]; then
-              echo "- **Latest daily note:** [${TODAY}](${BASE_PATH}/daily/${TODAY}.md)"
-            else
-              echo "- **Latest daily note:** (none today yet)"
-            fi
-            echo "- **Members Directory:** [${BASE_PATH}/members.md](${BASE_PATH}/members.md)"
-            echo
-          } > "$INDEX"
-
-      - name: Show changes
-        run: |
-          echo "=== git status ==="
-          git status --porcelain
-          echo "=== tree tech-debt ==="
-          ls -la "${GROUP_SLUG}" || true
-          echo "=== tree chats roots (after git rm) ==="
-          for ROOT in ${ZIP_ROOTS}; do
-            echo "--- $ROOT"
-            ls -la "$ROOT" || true
-          done
-
-      - name: Commit & push changes (fast-forward only, retry)
-        run: |
-          set -euo pipefail
-          BRANCH="${GITHUB_REF_NAME}"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git commit -m "chore(ci): normalize WhatsApp export, update index (/tech-debt) and stub daily note"
-
-          # Try push; if remote advanced dur
