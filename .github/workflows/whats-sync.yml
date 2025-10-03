@@ -1,4 +1,4 @@
-name: WhatsApp Group Sync (Simple, /tech-debt)
+name: WhatsApp Group Sync (Simple, /tech-debt, fast-forward safe)
 
 on:
   push:
@@ -22,10 +22,19 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (full history for rebase)
+      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # Ensure our local branch exactly matches remote before we modify files
+      - name: Sync to latest remote (avoid non-fast-forward)
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+          git reset --hard "origin/$BRANCH"
 
       - name: Prepare workspace
         run: |
@@ -49,7 +58,7 @@ jobs:
             mkdir -p "$DEST"
             unzip -o "$ZIP" -d "$DEST" >/dev/null
 
-            # _chat.txt, _chat 2.txt, _chat 3.txt, ...
+            # iOS exports: _chat.txt, _chat 2.txt, _chat 3.txt, ...
             while IFS= read -r -d '' TXT; do
               echo "Found chat txt: $TXT"
               # Extract only today's messages; keep continuation lines
@@ -65,28 +74,28 @@ jobs:
               ' "$TXT" >> "${GROUP_SLUG}/raw/${TODAY}.txt"
             done < <(find "$DEST" -type f -iname '_chat*.txt' -print0)
 
-            # Clean temp and stage ZIP deletion in git
+            # Clean temp and stage ZIP deletion so it appears in the commit
             rm -rf "$DEST"
             git rm -f "$ZIP" || true
           done
 
-          # De-duplicate appended lines in raw file (if multiple zips same day)
+          # De-duplicate lines in today's raw file (multiple zips same day)
           if [ -f "${GROUP_SLUG}/raw/${TODAY}.txt" ]; then
             awk '!seen[$0]++' "${GROUP_SLUG}/raw/${TODAY}.txt" > "${GROUP_SLUG}/raw/${TODAY}.txt.tmp" && mv "${GROUP_SLUG}/raw/${TODAY}.txt.tmp" "${GROUP_SLUG}/raw/${TODAY}.txt"
           fi
 
-          echo "Done collecting today's messages."
           echo "HOUR=$HOUR" >> $GITHUB_ENV
           echo "TODAY=$TODAY" >> $GITHUB_ENV
 
-      - name: Create/update stub daily summary (runs only after 18:00)
+      - name: Create/update stub daily summary (only after 18:00)
         run: |
           set -euo pipefail
           TODAY="${TODAY:-$(date +%F)}"
+          HOUR="${HOUR:-$(date +%H)}"
           RAW="${GROUP_SLUG}/raw/${TODAY}.txt"
           OUT="${GROUP_SLUG}/daily/${TODAY}.md"
 
-          if [ "${HOUR:-00}" -ge 18 ]; then
+          if [ "$HOUR" -ge 18 ]; then
             if [ -f "$RAW" ]; then
               COUNT=$(wc -l < "$RAW" | tr -d ' ')
             else
@@ -120,7 +129,7 @@ jobs:
             } > "${GROUP_SLUG}/members.md"
           fi
 
-      - name: Update index with /tech-debt base path
+      - name: Update index (base path /tech-debt)
         run: |
           set -euo pipefail
           TODAY="${TODAY:-$(date +%F)}"
@@ -146,7 +155,7 @@ jobs:
           echo "=== tree chats (after git rm) ==="
           ls -la chats || true
 
-      - name: Commit & push changes (rebase-safe)
+      - name: Commit & push changes (fast-forward only, retry)
         run: |
           set -euo pipefail
           BRANCH="${GITHUB_REF_NAME}"
@@ -160,4 +169,15 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore(ci): normalize WhatsApp export, update index (/tech-debt) and stub
+          git commit -m "chore(ci): normalize WhatsApp export, update index (/tech-debt) and stub daily note"
+
+          # Try push; if remote advanced during our run, rebase and retry up to 2 times
+          for attempt in 1 2 3; do
+            if git push origin "$BRANCH"; then
+              echo "Push succeeded on attempt $attempt"
+              break
+            fi
+            echo "Push failed (attempt $attempt). Fetching and rebasing..."
+            git fetch origin "$BRANCH"
+            git pull --rebase --autostash origin "$BRANCH"
+          done
