@@ -3,7 +3,7 @@ name: WhatsApp Group Sync
 on:
   push:
     paths:
-      - 'tech-debt/chats/**/*.zip'
+      - 'chats/**/*.zip'
 
 permissions:
   contents: write
@@ -36,7 +36,7 @@ jobs:
           echo "Today (local): $TODAY ; Hour: $HOUR ; TDATE: $TDATE"
 
           shopt -s nullglob
-          for ZIP in tech-debt/chats/**/*.zip; do
+          for ZIP in chats/**/*.zip; do
             echo "Processing: $ZIP"
             DEST=".tmp/$(basename "$ZIP" .zip)"
             mkdir -p "$DEST"
@@ -58,7 +58,7 @@ jobs:
             done < <(find "$DEST" -type f -iname '_chat*.txt' -print0)
 
             rm -rf "$DEST"
-            rm -f "$ZIP"
+            git rm -f "$ZIP" || true
           done
 
           if [ -f "${GROUP_SLUG}/raw/${TODAY}.txt" ]; then
@@ -70,7 +70,7 @@ jobs:
           echo "TODAY=$TODAY" >> $GITHUB_ENV
 
       - name: Create/update stub daily summary after 18:00
-        if: ${{ env.HOUR >= '18' }}
+        if: ${{ env.HOUR >= '10' }}
         run: |
           set -euo pipefail
           TODAY="${{ env.TODAY }}"
